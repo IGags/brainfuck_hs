@@ -6,6 +6,7 @@ import System.Exit(die)
 import Data.Array(array, Array, listArray, (!), (//))
 import Data.Maybe(listToMaybe, isNothing)
 import Data.Char(ord, chr)
+import Control.Monad(when)
 
 data BfCommand =
       Add Int
@@ -25,6 +26,7 @@ data ExecutionCtx = ExecutionCtx
                     , instructions   :: Array Int BfCommand
                     , instructionPtr :: Int
                     , loopStack      :: [Int]
+                    , executedCmdCt  :: Int
                     } deriving (Show, Eq)
 
 main :: IO ExecutionCtx
@@ -55,14 +57,14 @@ parseChar ch = case ch of
 
 parseProgram :: [Char] -> [BfCommand]
 parseProgram = foldr fld [ProgramEnd]
-    where 
+    where
         fld :: Char -> [BfCommand] -> [BfCommand]
         fld char arr = case parseChar char of
             Nothing -> arr
             Just cmd -> cmd : arr
 
 memoryLength :: Int
-memoryLength = 256
+memoryLength = 30000
 
 makeExecutionCtx :: [BfCommand] -> ExecutionCtx
 makeExecutionCtx program =
@@ -72,6 +74,7 @@ makeExecutionCtx program =
     , instructions = listArray (1, length program) program
     , instructionPtr = 1
     , loopStack = []
+    , executedCmdCt = 0
     }
 
 changeMemoryVal :: Array Int Int -> Int -> (Int -> Int) -> Array Int Int
@@ -84,13 +87,13 @@ getCurrentCommand :: ExecutionCtx -> BfCommand
 getCurrentCommand ExecutionCtx {instructions, instructionPtr} = instructions ! instructionPtr
 
 advanceExecution :: ExecutionCtx -> ExecutionCtx
-advanceExecution ctx = ctx {instructionPtr = succ $ instructionPtr ctx}
+advanceExecution ctx = ctx {instructionPtr = succ $ instructionPtr ctx, executedCmdCt = succ $ executedCmdCt ctx }
 
 interpretCommand :: ExecutionCtx -> BfCommand -> IO ExecutionCtx
 interpretCommand ctx (Add _)
   | getCurrentMemoryCell ctx == 255 = return ctx { memory = changeMemoryVal (memory ctx) (memoryPtr ctx) (const 0) }
   | otherwise = return ctx { memory = changeMemoryVal (memory ctx) (memoryPtr ctx) succ }
-interpretCommand ctx (Sub _) 
+interpretCommand ctx (Sub _)
   | getCurrentMemoryCell ctx == 0 = return ctx { memory = changeMemoryVal (memory ctx) (memoryPtr ctx) (const 255) }
   | otherwise = return ctx { memory = changeMemoryVal (memory ctx) (memoryPtr ctx) pred }
 interpretCommand ctx (SubAddress _) =
@@ -102,10 +105,11 @@ interpretCommand ctx (AddAddress _) =
 interpretCommand ctx LoopStart = return ctx { loopStack = instructionPtr ctx : loopStack ctx}
 interpretCommand ctx LoopEnd
   | isNothing $ listToMaybe $ loopStack ctx = die ("Program error, cycle has no open brace. " ++ show ctx)
-  | getCurrentMemoryCell ctx == 0 = return ctx { loopStack = tail $ loopStack ctx }
-  | otherwise = return ctx { instructionPtr = head $ loopStack ctx }
+  | getCurrentMemoryCell ctx == 0 = return ctx { loopStack = tail $ loopStack ctx, executedCmdCt = succ $ executedCmdCt ctx }
+  | otherwise = return ctx { instructionPtr = head $ loopStack ctx, executedCmdCt = succ $ executedCmdCt ctx }
 interpretCommand ctx Read = do
         charVal <- getChar
+        when (charVal /= '\n') $ putChar '\n'
         return ctx { memory = changeMemoryVal (memory ctx) (memoryPtr ctx) (const $ ord charVal) }
 interpretCommand ctx Write = do
     putChar $ chr $ getCurrentMemoryCell ctx
