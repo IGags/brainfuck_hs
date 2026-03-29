@@ -136,7 +136,6 @@ interpretCommand ctx LoopEnd
   | otherwise = return $ ctx { instructionPtr = head $ loopStack ctx, loopStack = tail $ loopStack ctx }
 interpretCommand ctx Read = do
         charVal <- getChar
-        when (charVal /= '\n') $ putChar '\n'
         return ctx { memory = changeMemoryVal (memory ctx) (memoryPtr ctx) (const $ ord charVal) }
 interpretCommand ctx Write = do
     putChar $ chr $ getCurrentMemoryCell ctx
