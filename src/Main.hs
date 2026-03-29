@@ -7,6 +7,7 @@ import Data.Array(array, Array, listArray, (!), (//))
 import Data.Maybe(listToMaybe, isNothing)
 import Data.Char(ord, chr)
 import Control.Monad(when)
+import Data.Map(fromList, Map, (!))
 
 data BfCommand =
       Add Int
@@ -25,15 +26,18 @@ data ExecutionCtx = ExecutionCtx
                     , memoryPtr      :: Int
                     , instructions   :: Array Int BfCommand
                     , instructionPtr :: Int
-                    , loopStack      :: [Int]
+                    , loopMap        :: Map Int Int
                     , executedCmdCt  :: Int
+                    , loopStack      :: [Int]
                     } deriving (Show, Eq)
 
 main :: IO ExecutionCtx
 main = do
     filePath <- processArgs =<< getArgs
     programText <- readFile filePath
-    runBrainfuck $ makeExecutionCtx $ parseProgram programText
+    ctx <- makeExecutionCtx $ parseBrainfuck programText
+    print ctx
+    runBrainfuck ctx
 
 argErrorText :: String
 argErrorText = "Invalid args count, please parse single arg wich is brainfuck file path."
@@ -55,58 +59,81 @@ parseChar ch = case ch of
     ',' -> Just Read
     _   -> Nothing
 
-parseProgram :: [Char] -> [BfCommand]
-parseProgram = foldr fld [ProgramEnd]
-    where
-        fld :: Char -> [BfCommand] -> [BfCommand]
-        fld char arr = case parseChar char of
-            Nothing -> arr
-            Just cmd -> cmd : arr
+mergeCommands :: Maybe BfCommand -> [BfCommand] -> [BfCommand]
+mergeCommands Nothing r = r
+mergeCommands (Just l) [] = [l]
+mergeCommands (Just lcmd) ((rcmd:xs)) = case (lcmd, rcmd) of
+    (Add ctl, Add ctr) -> Add (ctl + ctr) : xs
+    (Sub ctl, Sub ctr) -> Sub (ctl + ctr) : xs
+    (SubAddress ctl, SubAddress ctr) -> SubAddress (ctl + ctr) : xs
+    (AddAddress ctl, AddAddress ctr) -> AddAddress (ctl + ctr) : xs
+    (lcmd, rcmd) -> [lcmd, rcmd] ++ xs
+
+parseBrainfuck :: String -> [BfCommand]
+parseBrainfuck [] = [ProgramEnd]
+parseBrainfuck (x:xs) =
+    let command = parseChar x in
+    let rest = parseBrainfuck xs in
+    mergeCommands command rest
 
 memoryLength :: Int
 memoryLength = 30000
 
-makeExecutionCtx :: [BfCommand] -> ExecutionCtx
-makeExecutionCtx program =
-    ExecutionCtx
-    { memory = array (1, memoryLength) [(i, 0) | i <- [1..memoryLength]]
-    , memoryPtr = 1
-    , instructions = listArray (1, length program) program
-    , instructionPtr = 1
-    , loopStack = []
-    , executedCmdCt = 0
-    }
+findLoops :: [BfCommand] -> IO [(Int, Int)]
+findLoops cmds = findLoops' [] [] 1 cmds
+    where
+        findLoops' :: [(Int, Int)] -> [Int] -> Int -> [BfCommand] -> IO [(Int, Int)]
+        findLoops' loops _ _ [] = return loops
+        findLoops' loops stack ix (cmd:cmds) =
+            case cmd of
+                LoopStart -> findLoops' loops (ix : stack) (succ ix) cmds
+                LoopEnd   -> if null stack
+                    then die "Loop brackets is not correct"
+                    else findLoops' (loops ++ [(head stack, ix)]) (tail stack) (succ ix) cmds
+                _         -> findLoops' loops stack (succ ix) cmds
+
+makeExecutionCtx :: [BfCommand] -> IO ExecutionCtx
+makeExecutionCtx program = do
+    loops <- findLoops program
+    let mp = fromList loops
+    return $ ExecutionCtx
+            { memory = array (1, memoryLength) [(i, 0) | i <- [1..memoryLength]]
+            , memoryPtr = 1
+            , instructions = listArray (1, length program) program
+            , instructionPtr = 1
+            , loopMap = mp
+            , executedCmdCt = 0
+            , loopStack = []
+            }
 
 changeMemoryVal :: Array Int Int -> Int -> (Int -> Int) -> Array Int Int
-changeMemoryVal mem ix mapFn = mem // [(ix, mapFn (mem ! ix))]
+changeMemoryVal mem ix mapFn = mem // [(ix, mapFn (mem Data.Array.! ix))]
 
 getCurrentMemoryCell :: ExecutionCtx -> Int
-getCurrentMemoryCell ExecutionCtx { memory, memoryPtr } = memory ! memoryPtr
+getCurrentMemoryCell ExecutionCtx { memory, memoryPtr } = memory Data.Array.! memoryPtr
 
 getCurrentCommand :: ExecutionCtx -> BfCommand
-getCurrentCommand ExecutionCtx {instructions, instructionPtr} = instructions ! instructionPtr
+getCurrentCommand ExecutionCtx {instructions, instructionPtr} = instructions Data.Array.! instructionPtr
 
 advanceExecution :: ExecutionCtx -> ExecutionCtx
 advanceExecution ctx = ctx {instructionPtr = succ $ instructionPtr ctx, executedCmdCt = succ $ executedCmdCt ctx }
 
 interpretCommand :: ExecutionCtx -> BfCommand -> IO ExecutionCtx
-interpretCommand ctx (Add _)
-  | getCurrentMemoryCell ctx == 255 = return ctx { memory = changeMemoryVal (memory ctx) (memoryPtr ctx) (const 0) }
-  | otherwise = return ctx { memory = changeMemoryVal (memory ctx) (memoryPtr ctx) succ }
-interpretCommand ctx (Sub _)
-  | getCurrentMemoryCell ctx == 0 = return ctx { memory = changeMemoryVal (memory ctx) (memoryPtr ctx) (const 255) }
-  | otherwise = return ctx { memory = changeMemoryVal (memory ctx) (memoryPtr ctx) pred }
-interpretCommand ctx (SubAddress _) =
-    if memoryPtr ctx == 0 then die ("Program error, attempt to underflow memory" ++ show ctx)
-    else return ctx { memoryPtr = pred $ memoryPtr ctx }
-interpretCommand ctx (AddAddress _) =
-    if memoryPtr ctx == memoryLength then die ("Program error, attempt to overflow memory " ++ show ctx)
-    else return ctx { memoryPtr = succ $ memoryPtr ctx}
-interpretCommand ctx LoopStart = return ctx { loopStack = instructionPtr ctx : loopStack ctx}
+interpretCommand ctx (Add val) = return ctx { memory = changeMemoryVal (memory ctx) (memoryPtr ctx) (\x -> mod (x + val) 256) }
+interpretCommand ctx (Sub val) = return ctx { memory = changeMemoryVal (memory ctx) (memoryPtr ctx) (\x -> mod (x - val) 256) }
+interpretCommand ctx (SubAddress val) =
+    if memoryPtr ctx <= val then die ("Program error, attempt to underflow memory" ++ show ctx)
+    else return ctx { memoryPtr = (memoryPtr ctx) - val }
+interpretCommand ctx (AddAddress val) =
+    if (memoryLength - memoryPtr ctx) < val then die ("Program error, attempt to overflow memory " ++ show ctx)
+    else return ctx { memoryPtr = val + memoryPtr ctx}
+interpretCommand ctx LoopStart =
+    if getCurrentMemoryCell ctx == 0
+    then return ctx { instructionPtr = loopMap ctx Data.Map.! instructionPtr ctx }
+    else return ctx { loopStack = pred (instructionPtr ctx) : loopStack ctx }
 interpretCommand ctx LoopEnd
   | isNothing $ listToMaybe $ loopStack ctx = die ("Program error, cycle has no open brace. " ++ show ctx)
-  | getCurrentMemoryCell ctx == 0 = return ctx { loopStack = tail $ loopStack ctx, executedCmdCt = succ $ executedCmdCt ctx }
-  | otherwise = return ctx { instructionPtr = head $ loopStack ctx, executedCmdCt = succ $ executedCmdCt ctx }
+  | otherwise = return $ ctx { instructionPtr = head $ loopStack ctx, loopStack = tail $ loopStack ctx }
 interpretCommand ctx Read = do
         charVal <- getChar
         when (charVal /= '\n') $ putChar '\n'
@@ -122,5 +149,4 @@ runBrainfuck ctx = case getCurrentCommand ctx of
     _ ->
         do
             newState <- interpretCommand ctx (getCurrentCommand ctx)
-            --print newState
             runBrainfuck $ advanceExecution newState

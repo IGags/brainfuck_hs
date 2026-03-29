@@ -72,6 +72,7 @@ executable brainfuck-hs
                     base ^>=4.21.0.0
                     , MissingH
                     , array
+                    , containers
 
     -- Directories containing source files.
     hs-source-dirs:   src
